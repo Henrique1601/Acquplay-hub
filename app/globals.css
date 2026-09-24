@@ -1,8 +1,10 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #050b14;
+  --foreground: #f8fafc;
+  --ease-apple: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out-apple: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
 @theme inline {
@@ -12,15 +14,53 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Redução de movimento (WCAG 2.1 AA / Emil Kowalski) */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Efeito de vidro Apple translúcido */
+.glass-panel {
+  background: rgba(10, 18, 32, 0.7);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-panel-elevated {
+  background: rgba(15, 25, 45, 0.85);
+  backdrop-filter: blur(20px) saturate(190%);
+  -webkit-backdrop-filter: blur(20px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.45);
+}
+
+/* Feedback tátil Apple instantâneo */
+.apple-press {
+  transition: transform 120ms var(--ease-apple), opacity 120ms var(--ease-apple);
+}
+
+.apple-press:active {
+  transform: scale(0.98);
+}
+
+/* Foco acessível com anel calibrado */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #050b14, 0 0 0 4px #38bdf8;
 }
