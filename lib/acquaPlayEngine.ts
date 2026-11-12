@@ -13,6 +13,13 @@ export interface UnidadeLeituraInput {
   leituraAtual: number;
 }
 
+export interface CicloFechamento {
+  mesReferencia: string;
+  dataLeituraAnterior: string;
+  dataLeituraAtual: string;
+  dataProximaLeitura: string;
+}
+
 export interface ItemConciliacao {
   unidade: string;
   consumo: number;
@@ -21,6 +28,10 @@ export interface ItemConciliacao {
   status: 'VERDADEIRO' | 'FALSO';
   diferenca: number;
   diferencaAbs: number;
+  leituraAnterior?: number;
+  leituraAtual?: number;
+  tipoAnomalia?: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
+  observacao?: string;
 }
 
 /**
@@ -112,47 +123,111 @@ export function calcularValorSabesp(consumoM3: number): number {
 export function conciliarComSergio(
   unidade: string,
   consumoM3: number,
-  valorSergio: number
+  valorSergio: number,
+  leituraAnterior?: number,
+  leituraAtual?: number
 ): {
   valorHydrojexe: number;
   valorSergio: number;
   status: 'VERDADEIRO' | 'FALSO';
   diferenca: number;
   diferencaAbs: number;
+  tipoAnomalia: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
+  observacao?: string;
 } {
   const valorHydrojexe = calcularValorSabesp(consumoM3);
   const diffReal = Number((valorHydrojexe - valorSergio).toFixed(2));
   const diferencaAbs = Number(Math.abs(diffReal).toFixed(2));
   const status = diferencaAbs <= 0.02 ? 'VERDADEIRO' : 'FALSO';
 
+  const anomalia = classificarConsumo(consumoM3);
+  let observacao = anomalia.descricao;
+
+  if (leituraAnterior !== undefined && leituraAtual !== undefined && leituraAtual < leituraAnterior) {
+    observacao = `⚠️ ${unidade}: Leitura atual (${leituraAtual}) menor que anterior (${leituraAnterior}). Troca de cyble/gasômetro detectada.`;
+  } else if (anomalia.alertaTrocaCyble) {
+    observacao = `⚠️ ${unidade}: Consumo negativo detectado (${consumoM3} m³). Troca de cyble/gasômetro detectada.`;
+  } else if (status === 'FALSO') {
+    observacao = `Divergência apurada: Sabesp R$ ${valorHydrojexe.toFixed(2)} vs Sérgio R$ ${valorSergio.toFixed(2)} (${diffReal > 0 ? '+' : ''}${diffReal.toFixed(2)})`;
+  }
+
   return {
     valorHydrojexe,
     valorSergio: Number(valorSergio.toFixed(2)),
     status,
     diferenca: diffReal,
-    diferencaAbs
+    diferencaAbs,
+    tipoAnomalia: anomalia.tipo,
+    observacao
   };
 }
 
 /**
- * 3. Cálculo da Tarifa de Gás Comgás (16 Medidores)
- * Retorna tanto a tarifa calculada com alta precisão (4 casas decimais para rateio)
- * quanto os totais consolidados.
+ * 3. Classificação de anomalias hidrométricas (Filtros operacionais do Notion)
+ * Média de referência padrão para gás é 20 m³.
  */
-export function calcularTarifaComgas(contas: ContaComgasMedidor[]): {
-  totalRs: number;
+export function classificarConsumo(consumo: number, mediaReferencia: number = 20): {
+  tipo: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
+  descricao: string;
+  alertaTrocaCyble: boolean;
+} {
+  if (consumo < 0) {
+    return {
+      tipo: 'NEGATIVO',
+      descricao: 'Consumo negativo (Suspeita de troca física de hidrômetro/gasômetro)',
+      alertaTrocaCyble: true
+    };
+  }
+  if (consumo > 0 && consumo <= 0.5) {
+    return {
+      tipo: 'BAIXO_QUASE_ZERO',
+      descricao: 'Consumo residual muito baixo (0,1 a 0,5 m³)',
+      alertaTrocaCyble: false
+    };
+  }
+  if (consumo > mediaReferencia * 1.5) {
+    return {
+      tipo: 'ALTO',
+      descricao: `Consumo elevado acima da média (${consumo} m³ vs ref ${mediaReferencia} m³)`,
+      alertaTrocaCyble: false
+    };
+  }
+  return {
+    tipo: 'NORMAL',
+    descricao: 'Consumo dentro do padrão normal',
+    alertaTrocaCyble: false
+  };
+}
+
+/**
+ * 4. Cálculo da Tarifa de Gás Comgás (16 Medidores) com expurgo de manutenção
+ * Regra do Notion: Taxas de manutenção dos medidores da concessionária são
+ * deduzidas do valor total antes de calcular a tarifa que vai para o Sérgio.
+ */
+export function calcularTarifaComgas(
+  contas: ContaComgasMedidor[],
+  valorManutencaoExpurgada: number = 0
+): {
+  totalBrutoRs: number;
+  manutencaoExpurgadaRs: number;
+  totalLiquidoRs: number;
   totalM3: number;
   tarifa: number;
   tarifaFormatada: string;
 } {
-  const totalRs = contas.reduce((acc, c) => acc + (c.valorRs || 0), 0);
+  const totalBrutoRs = contas.reduce((acc, c) => acc + (c.valorRs || 0), 0);
   const totalM3 = contas.reduce((acc, c) => acc + (c.volumeM3 || 0), 0);
   
-  // No rateio condominial, a tarifa precisa de pelo menos 4 a 6 casas para evitar desvios no fechamento
-  const tarifa = totalM3 > 0 ? totalRs / totalM3 : 0;
+  const manutencaoLimpa = Math.max(0, isNaN(valorManutencaoExpurgada) ? 0 : valorManutencaoExpurgada);
+  const totalLiquidoRs = Math.max(0, totalBrutoRs - manutencaoLimpa);
+
+  // Tarifa líquida dividida pelo m3 total faturado
+  const tarifa = totalM3 > 0 ? totalLiquidoRs / totalM3 : 0;
 
   return {
-    totalRs: Number(totalRs.toFixed(2)),
+    totalBrutoRs: Number(totalBrutoRs.toFixed(2)),
+    manutencaoExpurgadaRs: Number(manutencaoLimpa.toFixed(2)),
+    totalLiquidoRs: Number(totalLiquidoRs.toFixed(2)),
     totalM3,
     tarifa: Number(tarifa.toFixed(4)),
     tarifaFormatada: tarifa.toFixed(2)
@@ -160,7 +235,7 @@ export function calcularTarifaComgas(contas: ContaComgasMedidor[]): {
 }
 
 /**
- * 4. Auditoria Cruzada Água x Gás (Regra 3:1 de disparidade)
+ * 5. Auditoria Cruzada Água x Gás (Regra 3:1 de disparidade)
  * Detecta hidrômetros travados, fraudes ou inconsistências de leitura.
  */
 export function auditarAguaGas(agua: number, gas: number): {
@@ -186,4 +261,88 @@ export function auditarAguaGas(agua: number, gas: number): {
   }
 
   return { vistoriarGas, vistoriarAgua, motivo };
+}
+
+/**
+ * 6. Gerador do Relatório Oficial para o Sérgio (Word / WhatsApp)
+ * Conforme instrução do Notion: "O que for falso documentar no Word e mandar para o Sérgio
+ * e ver o porquê está diferente, anotar tudo."
+ */
+export function gerarRelatorioSergio(
+  ciclo: CicloFechamento,
+  itens: ItemConciliacao[],
+  dadosGas?: {
+    tarifaFormatada: string;
+    manutencaoExpurgada: number;
+    totalLiquidoRs: number;
+    totalM3: number;
+  }
+): string {
+  const divergencias = itens.filter(i => i.status === 'FALSO');
+  const negativos = itens.filter(i => i.consumo < 0 || i.tipoAnomalia === 'NEGATIVO');
+  const altos = itens.filter(i => i.tipoAnomalia === 'ALTO');
+  const total = itens.length;
+  const aprovados = total - divergencias.length;
+
+  let texto = `*ACQUAPLAY HOME & RESORT — RELATÓRIO DE AUDITORIA & CONCILIAÇÃO*\n`;
+  texto += `*Mês de Referência:* ${ciclo.mesReferencia}\n`;
+  texto += `*Período de Medição:* ${ciclo.dataLeituraAnterior} até ${ciclo.dataLeituraAtual} (Próxima: ${ciclo.dataProximaLeitura})\n`;
+  texto += `*Responsável Técnico:* Hydrojexe Individualizações\n`;
+  texto += `--------------------------------------------------\n\n`;
+
+  texto += `📌 *RESUMO EXECUTIVO*\n`;
+  texto += `• Total de Unidades Auditadas: ${total.toLocaleString('pt-BR')}\n`;
+  texto += `• Aprovados com Sabesp 2026 (VERDADEIRO): ${aprovados}\n`;
+  texto += `• Divergências Identificadas (FALSO): ${divergencias.length}\n`;
+  texto += `• Casos com Consumo Negativo / Troca Cyble: ${negativos.length}\n\n`;
+
+  if (dadosGas) {
+    texto += `🔥 *RATEIO COMGÁS*\n`;
+    texto += `• Tarifa Aplicada no Rateio: R$ ${dadosGas.tarifaFormatada} / m³\n`;
+    if (dadosGas.manutencaoExpurgada > 0) {
+      texto += `• Manutenção Expurgada do Rateio: ${formatarMoedaBRL(dadosGas.manutencaoExpurgada)} (conforme instrução)\n`;
+    }
+    texto += `• Volume Total Faturado: ${formatarM3(dadosGas.totalM3, 0)} m³\n\n`;
+  }
+
+  if (divergencias.length > 0) {
+    texto += `⚠️ *RELAÇÃO DE DIVERGÊNCIAS (FOLHA DO SÉRGIO x HYDROJEXE)*\n`;
+    divergencias.forEach((d, idx) => {
+      const diffSinal = d.diferenca > 0 ? `+${formatarMoedaBRL(d.diferenca)}` : formatarMoedaBRL(d.diferenca);
+      texto += `${idx + 1}. *${d.unidade}*\n`;
+      texto += `   - Consumo: ${formatarM3(d.consumo)} m³\n`;
+      texto += `   - Valor Sabesp 2026: ${formatarMoedaBRL(d.valorHydrojexe)}\n`;
+      texto += `   - Valor Sérgio: ${formatarMoedaBRL(d.valorSergio)}\n`;
+      texto += `   - Diferença: ${diffSinal}\n`;
+      if (d.observacao) texto += `   - Obs: ${d.observacao}\n`;
+      texto += `\n`;
+    });
+  } else {
+    texto += `✅ *Nenhuma divergência apurada entre a folha e a tabela Sabesp.*\n\n`;
+  }
+
+  if (negativos.length > 0) {
+    texto += `🚨 *CONSUMOS NEGATIVOS / TROCA DE MEDIDOR (REQUER RETROATIVO)*\n`;
+    negativos.forEach((n, idx) => {
+      texto += `${idx + 1}. *${n.unidade}* (Consumo: ${formatarM3(n.consumo)} m³)\n`;
+      texto += `   - Ação: Aplicar retroativo do antigo medidor e reiniciar contagem do novo medidor a partir do zero.\n`;
+    });
+    texto += `\n`;
+  }
+
+  if (altos.length > 0) {
+    texto += `📈 *UNIDADES COM CONSUMO MUITO ACIMA DA MÉDIA*\n`;
+    altos.slice(0, 15).forEach((a, idx) => {
+      texto += `${idx + 1}. *${a.unidade}* — Consumo: ${formatarM3(a.consumo)} m³\n`;
+    });
+    if (altos.length > 15) {
+      texto += `   ... e mais ${altos.length - 15} unidades.\n`;
+    }
+    texto += `\n`;
+  }
+
+  texto += `--------------------------------------------------\n`;
+  texto += `Relatório gerado automaticamente pelo AcquaPlay Hub em ${new Date().toLocaleDateString('pt-BR')}.`;
+
+  return texto;
 }

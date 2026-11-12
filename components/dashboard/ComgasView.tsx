@@ -1,7 +1,7 @@
 // components/dashboard/ComgasView.tsx
 import React, { useState } from 'react';
 import { GlassCard } from '@/components/ui/GlassCard';
-import { Flame, Calculator } from 'lucide-react';
+import { Flame, Calculator, ShieldCheck } from 'lucide-react';
 import { formatarMoedaBRL, formatarM3 } from '@/lib/acquaPlayEngine';
 
 export interface ContaComgasItem {
@@ -17,6 +17,7 @@ interface ComgasViewProps {
   tarifaPrecisa: number;
   totalRs: number;
   totalM3: number;
+  onAtualizarManutencao: (valor: number) => void;
 }
 
 export function ComgasView({
@@ -24,9 +25,11 @@ export function ComgasView({
   tarifaFormatada,
   tarifaPrecisa,
   totalRs,
-  totalM3
+  totalM3,
+  onAtualizarManutencao
 }: ComgasViewProps) {
   const [filtroTorre, setFiltroTorre] = useState<string>('TODAS');
+  const [manutencaoInput, setManutencaoInput] = useState('0');
 
   const torres = ['TODAS', 'TORRE A', 'TORRE B', 'TORRE C', 'TORRE D', 'TORRE E', 'TORRE F', 'TORRE G', 'TORRE H'];
 
@@ -34,6 +37,12 @@ export function ComgasView({
     if (filtroTorre === 'TODAS') return true;
     return c.bloco.toUpperCase().includes(filtroTorre);
   });
+
+  const handleManutencaoChange = (val: string) => {
+    setManutencaoInput(val);
+    const num = parseFloat(val) || 0;
+    onAtualizarManutencao(num);
+  };
 
   return (
     <div className="space-y-6">
@@ -49,7 +58,7 @@ export function ComgasView({
               Fórmula de Rateio do Condomínio (16 Medidores)
             </h3>
             <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
-              A tarifa aplicada às 1.435 unidades é calculada pela divisão exata da soma total das faturas dos medidores mestres pelo volume total em metros cúbicos medido pela concessionária.
+              A tarifa aplicada às 1.435 unidades é calculada pela divisão exata da soma total das faturas (expurgando taxas de manutenção da concessionária) pelo volume total em metros cúbicos.
             </p>
           </div>
 
@@ -73,12 +82,27 @@ export function ComgasView({
           </div>
         </div>
 
-        {/* Resumo da Equação */}
-        <div className="mt-6 pt-4 border-t border-slate-800/60 grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+        {/* Resumo da Equação + Campo de Manutenção */}
+        <div className="mt-6 pt-4 border-t border-slate-800/60 grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
           <div>
-            <span className="text-slate-400 block">Soma das Faturas (16 Medidores)</span>
+            <span className="text-slate-400 block">Soma das Faturas (Bruto)</span>
             <span className="text-base font-bold text-slate-100 font-mono mt-0.5 block">
               {formatarMoedaBRL(totalRs)}
+            </span>
+          </div>
+
+          <div className="focus-within:ring-2 focus-within:ring-amber-500/50 rounded-xl transition">
+            <label className="text-slate-400 block text-[11px] uppercase tracking-wider mb-0.5">
+              Expurgar Manutenção (R$)
+            </label>
+            <input
+              type="number"
+              value={manutencaoInput}
+              onChange={(e) => handleManutencaoChange(e.target.value)}
+              className="bg-slate-950/80 border border-slate-800 rounded-lg px-2 py-1 w-full text-amber-400 font-mono font-bold"
+            />
+            <span className="flex items-center gap-1 text-[10px] text-amber-600/80 mt-1">
+              <ShieldCheck className="w-3 h-3" /> Expurga do rateio pro Sérgio
             </span>
           </div>
 
@@ -92,7 +116,7 @@ export function ComgasView({
           <div>
             <span className="text-slate-400 block">Equação Contábil</span>
             <span className="text-xs text-slate-300 font-mono mt-1 block">
-              {formatarMoedaBRL(totalRs)} ÷ {formatarM3(totalM3, 0)} m³ = R$ {tarifaFormatada}/m³
+              (Total - Expurgos) ÷ m³
             </span>
           </div>
         </div>

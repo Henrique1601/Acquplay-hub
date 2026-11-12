@@ -10,7 +10,8 @@ import { UploadDropzone } from '@/components/dashboard/UploadDropzone';
 import { ConciliacaoView } from '@/components/dashboard/ConciliacaoView';
 import { ComgasView, ContaComgasItem } from '@/components/dashboard/ComgasView';
 import { AuditoriaView, CasoAuditoriaItem } from '@/components/dashboard/AuditoriaView';
-import { calcularTarifaComgas, ItemConciliacao } from '@/lib/acquaPlayEngine';
+import { CicloMetadadosBar } from '@/components/dashboard/CicloMetadadosBar';
+import { calcularTarifaComgas, ItemConciliacao, CicloFechamento, gerarRelatorioSergio } from '@/lib/acquaPlayEngine';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const CONTAS_COMGAS_INICIAIS: ContaComgasItem[] = [
@@ -66,7 +67,14 @@ export default function AcquaPlayHub() {
   const [modoFoco, setModoFoco] = useState(false);
   const [tabAtiva, setTabAtiva] = useState<TabId>('upload');
   const [contasComgas] = useState<ContaComgasItem[]>(CONTAS_COMGAS_INICIAIS);
+  const [manutencaoGasExpurgada, setManutencaoGasExpurgada] = useState(0);
   const [casosAuditoria, setCasosAuditoria] = useState<CasoAuditoriaItem[]>(CASOS_AUDITORIA_INICIAIS);
+  const [cicloFechamento, setCicloFechamento] = useState<CicloFechamento>({
+    mesReferencia: 'Outubro/2026',
+    dataLeituraAnterior: '15/09/2026',
+    dataLeituraAtual: '15/10/2026',
+    dataProximaLeitura: '15/11/2026'
+  });
 
   // Estados de upload e conciliação
   const [isUploading, setIsUploading] = useState(false);
@@ -81,15 +89,6 @@ export default function AcquaPlayHub() {
       status: 'VERDADEIRO',
       diferenca: 0.0,
       diferencaAbs: 0.0
-    },
-    {
-      unidade: 'Torre B-APTO0054',
-      consumo: 22.10,
-      valorHydrojexe: 226.26,
-      valorSergio: 218.50,
-      status: 'FALSO',
-      diferenca: 7.76,
-      diferencaAbs: 7.76
     }
   ]);
 
@@ -103,9 +102,10 @@ export default function AcquaPlayHub() {
         blocoMedidor: c.bloco,
         valorRs: c.valorRs,
         volumeM3: c.volumeM3
-      }))
+      })),
+      manutencaoGasExpurgada
     );
-  }, [contasComgas]);
+  }, [contasComgas, manutencaoGasExpurgada]);
 
   // Contagens dinâmicas
   const totalUnidades = dadosConciliacao.length > 2 ? dadosConciliacao.length : 1435;
@@ -158,14 +158,18 @@ export default function AcquaPlayHub() {
     try {
       const wb = XLSX.utils.book_new();
 
-      // Aba 1: Conciliação Sabesp
+      // Aba 1: Conciliação Sabesp (Com datas e ciclo)
       const dadosExportConciliacao = dadosConciliacao.map(item => ({
-        'Unidade / Apartamento': item.unidade,
+        'Unidade': item.unidade,
+        'Ciclo': cicloFechamento.mesReferencia,
+        'Leitura Anterior': item.leituraAnterior || 'N/A',
+        'Leitura Atual': item.leituraAtual || 'N/A',
         'Consumo Sabesp (m³)': item.consumo,
         'Cálculo Hydrojexe (R$)': item.valorHydrojexe,
         'Folha Sérgio (R$)': item.valorSergio,
         'Status Conciliação': item.status,
-        'Diferença (R$)': item.diferenca
+        'Diferença (R$)': item.diferenca,
+        'Observações': item.observacao || ''
       }));
       const wsConciliacao = XLSX.utils.json_to_sheet(dadosExportConciliacao);
       XLSX.utils.book_append_sheet(wb, wsConciliacao, 'Conciliacao_Sabesp');
@@ -176,7 +180,7 @@ export default function AcquaPlayHub() {
         'Código Comgás': c.codigo,
         'Volume (m³)': c.volumeM3,
         'Valor Total (R$)': c.valorRs,
-        'Tarifa Rateio (R$/m³)': dadosGas.tarifaFormatada
+        'Tarifa Rateio Líquida (R$/m³)': dadosGas.tarifaFormatada
       }));
       const wsGas = XLSX.utils.json_to_sheet(dadosExportGas);
       XLSX.utils.book_append_sheet(wb, wsGas, 'Medidores_Comgas');
@@ -194,10 +198,25 @@ export default function AcquaPlayHub() {
       XLSX.utils.book_append_sheet(wb, wsAuditoria, 'Vistorias_Auditoria');
 
       const dataAtual = new Date().toISOString().split('T')[0];
-      XLSX.writeFile(wb, `AcquaPlay_Fechamento_${dataAtual}.xlsx`);
+      XLSX.writeFile(wb, `AcquaPlay_Fechamento_${cicloFechamento.mesReferencia.replace('/', '_')}_${dataAtual}.xlsx`);
     } catch {
       alert('Falha ao exportar planilha Excel.');
     }
+  };
+
+  const handleCopiarRelatorioSergio = () => {
+    const relatorio = gerarRelatorioSergio(
+      cicloFechamento,
+      dadosConciliacao,
+      {
+        tarifaFormatada: dadosGas.tarifaFormatada,
+        manutencaoExpurgada: dadosGas.manutencaoExpurgadaRs,
+        totalLiquidoRs: dadosGas.totalLiquidoRs,
+        totalM3: dadosGas.totalM3
+      }
+    );
+    navigator.clipboard.writeText(relatorio);
+    setUploadSuccessMessage('Relatório da conciliação copiado para a área de transferência! Pronto para enviar no WhatsApp ou colar no Word para o Sérgio.');
   };
 
   const toggleConfirmarRetroativo = (id: string) => {
@@ -218,6 +237,12 @@ export default function AcquaPlayHub() {
           onToggleModoFoco={() => setModoFoco(prev => !prev)}
           onExportarExcel={handleExportarExcel}
           onRolarParaConsole={() => consoleRef.current?.scrollIntoView({ behavior: 'smooth' })}
+        />
+        
+        {/* Barra de Metadados do Ciclo */}
+        <CicloMetadadosBar
+          ciclo={cicloFechamento}
+          onAtualizarCiclo={(campo, valor) => setCicloFechamento(prev => ({ ...prev, [campo]: valor }))}
         />
 
         {/* Feedback de Operação (Alertas Acessíveis) */}
@@ -244,7 +269,7 @@ export default function AcquaPlayHub() {
         {/* Métricas do Condomínio */}
         <CondoMetricsBar
           totalUnidades={totalUnidades}
-          totalRsGas={dadosGas.totalRs}
+          totalRsGas={dadosGas.totalLiquidoRs}
           totalM3Gas={dadosGas.totalM3}
           tarifaFormatadaGas={dadosGas.tarifaFormatada}
           tarifaPrecisaGas={dadosGas.tarifa}
@@ -277,6 +302,7 @@ export default function AcquaPlayHub() {
               <ConciliacaoView
                 dados={dadosConciliacao}
                 onExportarExcel={handleExportarExcel}
+                onCopiarRelatorioSergio={handleCopiarRelatorioSergio}
               />
             )}
 
@@ -285,8 +311,9 @@ export default function AcquaPlayHub() {
                 contas={contasComgas}
                 tarifaFormatada={dadosGas.tarifaFormatada}
                 tarifaPrecisa={dadosGas.tarifa}
-                totalRs={dadosGas.totalRs}
+                totalRs={dadosGas.totalLiquidoRs}
                 totalM3={dadosGas.totalM3}
+                onAtualizarManutencao={setManutencaoGasExpurgada}
               />
             )}
 

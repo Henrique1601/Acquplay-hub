@@ -85,6 +85,7 @@ export async function POST(req: NextRequest) {
 
     const resultadoConciliacao: ItemConciliacao[] = [];
     const divergencias: ItemConciliacao[] = [];
+    const negativos: ItemConciliacao[] = [];
 
     for (const row of rows) {
       const unidadeRaw = extrairCampo(row, [
@@ -118,13 +119,31 @@ export async function POST(req: NextRequest) {
         'Valor Cobrado'
       ]);
 
+      const leituraAnteriorRaw = extrairCampo(row, [
+        'Leitura Anterior',
+        'Leit Anterior',
+        'Leitura Ant',
+        'Ant',
+        'Anterior'
+      ]);
+
+      const leituraAtualRaw = extrairCampo(row, [
+        'Leitura Atual',
+        'Leit Atual',
+        'Atual'
+      ]);
+
       const consumo = parseNumeroBR(consumoRaw);
       const valorSergio = parseNumeroBR(valorSergioRaw);
+      const leituraAnterior = leituraAnteriorRaw !== undefined ? parseNumeroBR(leituraAnteriorRaw) : undefined;
+      const leituraAtual = leituraAtualRaw !== undefined ? parseNumeroBR(leituraAtualRaw) : undefined;
 
-      const audit = conciliarComSergio(unidade, consumo, valorSergio);
+      const audit = conciliarComSergio(unidade, consumo, valorSergio, leituraAnterior, leituraAtual);
       const item: ItemConciliacao = {
         unidade,
         consumo,
+        leituraAnterior,
+        leituraAtual,
         ...audit
       };
 
@@ -132,6 +151,10 @@ export async function POST(req: NextRequest) {
 
       if (audit.status === 'FALSO') {
         divergencias.push(item);
+      }
+
+      if (item.tipoAnomalia === 'NEGATIVO' || consumo < 0) {
+        negativos.push(item);
       }
     }
 
@@ -143,6 +166,7 @@ export async function POST(req: NextRequest) {
       total,
       aprovados,
       divergenciasCount: divergencias.length,
+      negativosCount: negativos.length,
       divergencias,
       detalhes: resultadoConciliacao,
       abaProcessada: sheetName,
