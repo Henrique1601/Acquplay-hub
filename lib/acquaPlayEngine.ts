@@ -42,12 +42,20 @@ export interface ItemConciliacao {
   diferencaAbs: number;
   leituraAnterior?: number;
   leituraAtual?: number;
+  leituraAnteriorSergio?: number;
+  leituraAtualSergio?: number;
+  consumoSergio?: number;
   tipoAnomalia?: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
   observacao?: string;
 
   // Campos específicos de gás e consolidação
   torre?: string;
+  leituraAnteriorGas?: number;
+  leituraAtualGas?: number;
   consumoGas?: number;
+  leituraAnteriorGasSergio?: number;
+  leituraAtualGasSergio?: number;
+  consumoGasSergio?: number;
   tarifaGasTorre?: number;
   valorGasHydrojexe?: number;
   valorGasSergio?: number;
@@ -57,6 +65,40 @@ export interface ItemConciliacao {
   // Total combinado
   valorTotalHydrojexe?: number;
   valorTotalSergio?: number;
+}
+
+export const MEDIDORES_COMGAS_ACQUAPLAY: Record<string, string> = {
+  '30267218': 'BLOCO A - MEDIDOR 1',
+  '30461499': 'BLOCO A - MEDIDOR 2',
+  '30446422': 'BLOCO B - MEDIDOR 1',
+  '30461286': 'BLOCO B - MEDIDOR 2',
+  '30446732': 'BLOCO C - MEDIDOR 1',
+  '30461669': 'BLOCO C - MEDIDOR 2',
+  '30449170': 'BLOCO D - MEDIDOR 1',
+  '30461863': 'BLOCO D - MEDIDOR 2',
+  '30461413': 'BLOCO E - MEDIDOR 1',
+  '30446945': 'BLOCO E - MEDIDOR 2',
+  '30449197': 'BLOCO F - MEDIDOR 1',
+  '30461430': 'BLOCO F - MEDIDOR 2',
+  '30449219': 'BLOCO G - MEDIDOR 1',
+  '30461456': 'BLOCO G - MEDIDOR 2',
+  '30462266': 'BLOCO H - MEDIDOR 1',
+  '30466377': 'BLOCO H - MEDIDOR 2',
+};
+
+/**
+ * Normaliza identificadores de apartamento para cruzamento exato entre planilhas
+ * Ex: "Torre A-APTO0031", "Torre A  APTO  0031", "Torre A 0031" -> "TORRE A-APTO0031"
+ */
+export function normalizarChaveUnidade(unidade: string): string {
+  const str = (unidade || '').toUpperCase().trim();
+  const torre = extrairTorre(str);
+  const matchApto = str.match(/(?:APTO|APT|AP)?\s*[-_/\s]?\s*0*(\d{1,4})\s*$/);
+  if (matchApto) {
+    const num = matchApto[1].padStart(4, '0');
+    return `${torre}-APTO${num}`;
+  }
+  return str.replace(/\s+/g, ' ');
 }
 
 export interface TarifaPorMedidor {
@@ -383,23 +425,85 @@ export function extrairCampoLinha(row: Record<string, unknown>, possiveisChaves:
 }
 
 /**
+ * Parser específico para abas brutas do ContaJusta ("ContaJusta Condominium_SABESP" / "ContaJusta Condominium_Gas").
+ * Localiza a seção "Detalhes Apto." e combina "Nome do Edifício" + "Código Apto." em "Torre X-APTOYYYY".
+ */
+export function extrairLinhasContaJusta(worksheet: XLSX.WorkSheet): Record<string, unknown>[] {
+  const matriz: unknown[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+  if (!matriz || matriz.length === 0) return [];
+
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(60, matriz.length); i++) {
+    const row = matriz[i];
+    if (!Array.isArray(row)) continue;
+    const joined = row.map(c => String(c || '').toLowerCase()).join('|');
+    if (joined.includes('código apto') || joined.includes('codigo apto')) {
+      headerIdx = i;
+      break;
+    }
+  }
+
+  if (headerIdx === -1) return [];
+
+  const headerRow = matriz[headerIdx].map(c => String(c || '').trim().toLowerCase());
+  const colEdificio = headerRow.findIndex(h => h.includes('edifício') || h.includes('edificio'));
+  const colApto = headerRow.findIndex(h => h.includes('código apto') || h.includes('codigo apto'));
+  const colConsumo = headerRow.findIndex(h => h === 'consumo');
+  const colValor = headerRow.findIndex(h => h.includes('valor consumido') || h.includes('valor'));
+
+  if (colEdificio === -1 || colApto === -1) return [];
+
+  const linhas: Record<string, unknown>[] = [];
+  for (let r = headerIdx + 1; r < matriz.length; r++) {
+    const row = matriz[r];
+    if (!Array.isArray(row)) continue;
+    const edificio = String(row[colEdificio] || '').trim();
+    const apto = String(row[colApto] || '').trim();
+    if (!edificio || !apto) continue;
+    // Ignora linhas de resumo/rodapé
+    if (!/torre|bloco/i.test(edificio)) continue;
+
+    const aptoPadded = /^\d+$/.test(apto) ? apto.padStart(4, '0') : apto;
+    linhas.push({
+      'Nome Medidor': `${edificio}-APTO${aptoPadded}`,
+      'Consumo': colConsumo !== -1 ? row[colConsumo] : 0,
+      'Valor Total': colValor !== -1 ? row[colValor] : 0,
+    });
+  }
+
+  return linhas;
+}
+
+/**
  * Parser Universal de Abas do Excel.
- * Detecta dinamicamente a linha de cabeçalho mesmo que haja logos ou títulos nas linhas 1 a 5.
+ * Detecta dinamicamente a linha de cabeçalho mesmo que haja títulos nas linhas 1 a 40.
  */
 export function extrairLinhasUniversal(worksheet: XLSX.WorkSheet): Record<string, unknown>[] {
   const matriz: unknown[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
   if (!matriz || matriz.length === 0) return [];
 
+  // Se for uma aba bruta do ContaJusta, usa o extrator específico
+  const ehContaJustaBruto = matriz.slice(0, 45).some(row =>
+    Array.isArray(row) && row.some(c => {
+      const s = String(c || '').toLowerCase();
+      return s.includes('detalhes apto') || s.includes('código apto') || s.includes('codigo apto');
+    })
+  );
+  if (ehContaJustaBruto) {
+    const linhasCJ = extrairLinhasContaJusta(worksheet);
+    if (linhasCJ.length > 0) return linhasCJ;
+  }
+
   // Palavras-chave típicas de cabeçalho
   const palavrasChave = [
-    'unidade', 'medidor', 'apto', 'apartamento', 'bloco', 'nome medidor', 
-    'consumo', 'valor', 'leitura', 'anterior', 'atual', 'total', 'código', 'conta', 'volume'
+    'unidade', 'medidor', 'apto', 'apartamento', 'bloco', 'nome medidor',
+    'consumo', 'valor', 'leitura', 'anterior', 'atual', 'total', 'código', 'conta', 'volume', 'torre'
   ];
 
   let linhaCabecalhoIdx = -1;
   let melhorContagem = 0;
 
-  for (let i = 0; i < Math.min(15, matriz.length); i++) {
+  for (let i = 0; i < Math.min(40, matriz.length); i++) {
     const linha = matriz[i];
     if (!Array.isArray(linha)) continue;
 
@@ -444,6 +548,82 @@ export function extrairLinhasUniversal(worksheet: XLSX.WorkSheet): Record<string
   }
 
   return linhasObjetos;
+}
+
+/**
+ * Extrai dados de uma fatura PDF da Comgás a partir do texto extraído.
+ * Identifica código de usuário (30xxxxxx), bloco/medidor, valor total (R$) e consumo faturado (m³).
+ */
+export function extrairContaComgasDeTextoPdf(
+  texto: string,
+  nomeArquivo: string
+): ContaComgasMedidor & { leituraAnterior?: number; leituraAtual?: number } {
+  const textoLimpo = texto.replace(/\s+/g, ' ').trim();
+
+  // 1. Código do usuário / conta contrato (ex: 30267218)
+  let codigoConta = '';
+  for (const cod of Object.keys(MEDIDORES_COMGAS_ACQUAPLAY)) {
+    if (textoLimpo.includes(cod) || nomeArquivo.includes(cod)) {
+      codigoConta = cod;
+      break;
+    }
+  }
+  if (!codigoConta) {
+    const matchCod = textoLimpo.match(/(?:c[oó]digo\s*(?:do\s*)?usu[aá]rio|instala[cç][aã]o|conta\s*contrato)[:\s]*([0-9]{7,10})/i)
+      || textoLimpo.match(/\b(30\d{6})\b/);
+    codigoConta = matchCod ? matchCod[1] : nomeArquivo.replace(/\.pdf$/i, '');
+  }
+
+  // 2. Bloco / Medidor
+  let blocoMedidor = MEDIDORES_COMGAS_ACQUAPLAY[codigoConta] || '';
+  if (!blocoMedidor) {
+    const matchBloco = textoLimpo.match(/(?:BLOCO|TORRE)\s*([A-H])\s*[-–]?\s*(?:MEDIDOR\s*([12]))?/i);
+    if (matchBloco) {
+      blocoMedidor = `BLOCO ${matchBloco[1].toUpperCase()}${matchBloco[2] ? ` - MEDIDOR ${matchBloco[2]}` : ''}`;
+    } else {
+      blocoMedidor = `Medidor ${codigoConta}`;
+    }
+  }
+
+  // 3. Valor Total da Fatura em R$
+  let valorRs = 0;
+  const regexValores = [
+    /(?:total\s*a\s*pagar|valor\s*a\s*pagar|valor\s*do\s*documento|total\s*da\s*fatura|valor\s*total)\s*[:\s]*R?\$?\s*([\d.]+,\d{2})/i,
+    /R\$\s*([\d.]+,\d{2})/g
+  ];
+  const mValorPrincipal = textoLimpo.match(regexValores[0]);
+  if (mValorPrincipal) {
+    valorRs = parseNumeroBR(mValorPrincipal[1]);
+  } else {
+    const todosValores = Array.from(textoLimpo.matchAll(/R\$\s*([\d.]+,\d{2})/g)).map(m => parseNumeroBR(m[1]));
+    if (todosValores.length > 0) {
+      valorRs = Math.max(...todosValores);
+    }
+  }
+
+  // 4. Consumo faturado em m³
+  let volumeM3 = 0;
+  const regexConsumo = [
+    /(?:consumo\s*faturado|volume\s*faturado|consumo\s*medido|consumo\s*\(?m[³3]\)?|total\s*faturado)\s*[:\s]*([\d.,]+)\s*m?[³3]?/i,
+    /([\d.,]+)\s*m[³3]\b/i
+  ];
+  for (const rx of regexConsumo) {
+    const m = textoLimpo.match(rx);
+    if (m) {
+      const val = parseNumeroBR(m[1]);
+      if (val > 0) {
+        volumeM3 = val;
+        break;
+      }
+    }
+  }
+
+  return {
+    codigoConta,
+    blocoMedidor,
+    valorRs,
+    volumeM3,
+  };
 }
 
 /**

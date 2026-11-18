@@ -10,6 +10,7 @@ import {
   calcularTarifaComgas,
   conciliarComSergio,
   classificarConsumo,
+  extrairContaComgasDeTextoPdf,
   ItemConciliacao,
   MedicaoIndividual,
   ContaComgasMedidor
@@ -20,29 +21,72 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const file = formData.get('file');
-    const tipo = (formData.get('tipo') || 'sergio') as 'agua' | 'gas_individual' | 'comgas' | 'sergio';
+    const filesRaw = formData.getAll('files');
+    const fileSingle = formData.get('file');
+    const allFiles: File[] = [
+      ...filesRaw.filter((f): f is File => f instanceof File),
+      ...(fileSingle instanceof File ? [fileSingle] : [])
+    ];
+    const tipo = (formData.get('tipo') || 'sergio') as
+      | 'agua'
+      | 'gas_individual'
+      | 'comgas'
+      | 'sergio'
+      | 'sergio_agua'
+      | 'sergio_gas';
     const tarifasPorTorreRaw = formData.get('tarifasPorTorre');
     const manutencaoGasRaw = formData.get('manutencaoGas');
 
-    if (!file || !(file instanceof File)) {
+    if (allFiles.length === 0) {
       return NextResponse.json(
-        { error: 'Nenhum arquivo enviado. Por favor selecione uma planilha (.xlsx, .xls ou .csv).' },
+        { error: 'Nenhum arquivo enviado. Por favor selecione uma planilha (.xlsx, .xls, .csv) ou PDFs da Comgás.' },
         { status: 400 }
       );
     }
 
-    if (file.size > MAX_FILE_SIZE) {
-      return NextResponse.json(
-        { error: `O arquivo excede o limite máximo de ${MAX_FILE_SIZE / (1024 * 1024)}MB.` },
-        { status: 413 }
-      );
+    const file = allFiles[0];
+
+    for (const f of allFiles) {
+      if (f.size > MAX_FILE_SIZE) {
+        return NextResponse.json(
+          { error: `O arquivo "${f.name}" excede o limite máximo de ${MAX_FILE_SIZE / (1024 * 1024)}MB.` },
+          { status: 413 }
+        );
+      }
+    }
+
+    const manutencaoGas = parseNumeroBR(manutencaoGasRaw);
+
+    // 0. Suporte a múltiplos PDFs da Comgás (16 faturas baixadas uma a uma)
+    const temPdf = allFiles.some(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (tipo === 'comgas' && temPdf) {
+      const pdfFiles = allFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
+      const { extractText } = await import('unpdf');
+      const contas: ContaComgasMedidor[] = [];
+
+      for (const pdfFile of pdfFiles) {
+        const buf = new Uint8Array(await pdfFile.arrayBuffer());
+        const { text } = await extractText(buf, { mergePages: true });
+        const textoCompleto = Array.isArray(text) ? text.join('\n') : String(text || '');
+        const conta = extrairContaComgasDeTextoPdf(textoCompleto, pdfFile.name);
+        contas.push(conta);
+      }
+
+      const resultadoGas = calcularTarifaComgas(contas, manutencaoGas);
+      return NextResponse.json({
+        success: true,
+        tipo: 'comgas',
+        contas,
+        resultadoGas,
+        abaProcessada: `${pdfFiles.length} PDF(s) Comgás`,
+        nomeArquivo: pdfFiles.length === 1 ? pdfFiles[0].name : `${pdfFiles.length} faturas PDF`
+      });
     }
 
     const extensao = file.name.split('.').pop()?.toLowerCase();
     if (!extensao || !['xlsx', 'xls', 'csv', 'ods'].includes(extensao)) {
       return NextResponse.json(
-        { error: 'Formato inválido. Envie uma planilha Excel (.xlsx, .xls) ou CSV.' },
+        { error: 'Formato inválido. Envie uma planilha Excel (.xlsx, .xls) ou CSV (ou PDFs para Comgás).' },
         { status: 400 }
       );
     }
@@ -66,14 +110,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const manutencaoGas = parseNumeroBR(manutencaoGasRaw);
-
     // Encontra a melhor aba que contenha linhas úteis
     let melhorSheetName = wb.SheetNames[0];
     let linhasExtraidas: Record<string, unknown>[] = [];
 
     // Prioridade para abas com nomes conhecidos se existirem
-    const prioridades = ['desmembrada', 'medição', 'medicao', 'água', 'agua', 'gás', 'gas', 'comgás', 'comgas', 'hidrometros', 'gasometros'];
+    const prioridades = [
+      'desmembrada',
+      'extratoindividualizado',
+      'extrato individualizado',
+      'contajusta',
+      'medição',
+      'medicao',
+      'água',
+      'agua',
+      'gás',
+      'gas',
+      'comgás',
+      'comgas',
+      'hidrometros',
+      'gasometros'
+    ];
     const abasOrdenadas = [...wb.SheetNames].sort((a, b) => {
       const aLower = a.toLowerCase();
       const bLower = b.toLowerCase();
@@ -220,17 +277,19 @@ export async function POST(req: NextRequest) {
           'Código', 'Codigo', 'Conta', 'Conta Contrato', 'Instalação', 'Instalacao', 'Nº', 'Contrato'
         ]);
         const valorRaw = extrairCampoLinha(row, [
-          'Valor', 'Valor (R$)', 'Total', 'Valor Total', 'R$', 'Valor Fatura'
+          'Valor em R$', 'Valor (R$)', 'Valor', 'Total', 'Valor Total', 'R$', 'Valor Fatura'
         ]);
         const volumeRaw = extrairCampoLinha(row, [
-          'Volume', 'Volume (m³)', 'Volume m3', 'Consumo', 'm3', 'Faturado', 'Volume Faturado'
+          'Consumo Medido Comgás', 'Consumo Medido', 'Volume (m³)', 'Volume m3', 'Volume', 'Consumo', 'm3', 'Faturado', 'Volume Faturado'
         ]);
 
+        const blocoStr = String(blocoRaw || '').trim();
         if (!blocoRaw && !codigoRaw && !valorRaw) continue;
+        if (/^total\b/i.test(blocoStr) && !codigoRaw) continue;
 
         const valorRs = parseNumeroBR(valorRaw);
         const volumeM3 = parseNumeroBR(volumeRaw);
-        const bloco = String(blocoRaw || `Medidor ${contas.length + 1}`).trim();
+        const bloco = blocoStr || `Medidor ${contas.length + 1}`;
         const codigoConta = String(codigoRaw || `3046${1400 + contas.length}`).trim();
 
         contas.push({
@@ -260,7 +319,93 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 4. Processar Folha do Sérgio (Conta Justa / Sabesp / Gás)
+    // 4A. Processar Demonstrativo do Sérgio — ÁGUA (separado)
+    if (tipo === 'sergio_agua') {
+      const itens: Array<{
+        unidade: string;
+        torre: string;
+        leituraAnterior?: number;
+        leituraAtual?: number;
+        consumo: number;
+        valorSergio: number;
+      }> = [];
+
+      for (const row of linhasExtraidas) {
+        const unidadeRaw = extrairCampoLinha(row, [
+          'Nome Medidor', 'Unidade', 'Medidor', 'Apartamento', 'Apto', 'Identificador', 'Apt'
+        ]);
+        if (!unidadeRaw) continue;
+        const unidade = String(unidadeRaw).trim();
+
+        const leituraAnteriorRaw = extrairCampoLinha(row, ['Leitura Anterior', 'Leit Anterior', 'Leitura Ant', 'Ant', 'Anterior']);
+        const leituraAtualRaw = extrairCampoLinha(row, ['Última Leitura', 'Ultima Leitura', 'Leitura Atual', 'Leit Atual', 'Atual']);
+        const consumoRaw = extrairCampoLinha(row, ['Consumo', 'Consumo (m³)', 'Consumo m3', 'Volume', 'm3', 'Consumo Sabesp']);
+        const valorRaw = extrairCampoLinha(row, ['Valor Total', 'Valor Consumido', 'Valor', 'Valor (R$)', 'Total', 'Valor Sergio', 'Valor Sérgio']);
+
+        itens.push({
+          unidade,
+          torre: extrairTorre(unidade),
+          leituraAnterior: leituraAnteriorRaw !== undefined ? parseNumeroBR(leituraAnteriorRaw) : undefined,
+          leituraAtual: leituraAtualRaw !== undefined ? parseNumeroBR(leituraAtualRaw) : undefined,
+          consumo: parseNumeroBR(consumoRaw),
+          valorSergio: parseNumeroBR(valorRaw)
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        tipo: 'sergio_agua',
+        total: itens.length,
+        itens,
+        abaProcessada: melhorSheetName,
+        nomeArquivo: file.name
+      });
+    }
+
+    // 4B. Processar Demonstrativo do Sérgio — GÁS (separado)
+    if (tipo === 'sergio_gas') {
+      const itens: Array<{
+        unidade: string;
+        torre: string;
+        leituraAnterior?: number;
+        leituraAtual?: number;
+        consumoGas: number;
+        valorGasSergio: number;
+      }> = [];
+
+      for (const row of linhasExtraidas) {
+        const unidadeRaw = extrairCampoLinha(row, [
+          'Nome Medidor', 'Unidade', 'Medidor', 'Apartamento', 'Apto', 'Identificador', 'Apt'
+        ]);
+        if (!unidadeRaw) continue;
+        const unidade = String(unidadeRaw).trim();
+
+        const leituraAnteriorRaw = extrairCampoLinha(row, ['Leitura Anterior', 'Leit Anterior', 'Leitura Ant', 'Ant', 'Anterior']);
+        const leituraAtualRaw = extrairCampoLinha(row, ['Última Leitura', 'Ultima Leitura', 'Leitura Atual', 'Leit Atual', 'Atual']);
+        const consumoRaw = extrairCampoLinha(row, ['Consumo', 'Consumo Gás', 'Consumo Gas', 'Consumo (m³)', 'Consumo m3', 'Volume', 'm3']);
+        const valorRaw = extrairCampoLinha(row, ['Valor Total', 'Valor Consumido', 'Valor', 'Valor (R$)', 'Valor Gás', 'Valor Gas', 'Total']);
+
+        itens.push({
+          unidade,
+          torre: extrairTorre(unidade),
+          leituraAnterior: leituraAnteriorRaw !== undefined ? parseNumeroBR(leituraAnteriorRaw) : undefined,
+          leituraAtual: leituraAtualRaw !== undefined ? parseNumeroBR(leituraAtualRaw) : undefined,
+          consumoGas: parseNumeroBR(consumoRaw),
+          valorGasSergio: parseNumeroBR(valorRaw)
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        tipo: 'sergio_gas',
+        total: itens.length,
+        itens,
+        abaProcessada: melhorSheetName,
+        nomeArquivo: file.name
+      });
+    }
+
+    // 4C. Processar Folha do Sérgio Unificada (legado)
     // tipo === 'sergio'
     const resultadoConciliacao: ItemConciliacao[] = [];
     const divergencias: ItemConciliacao[] = [];

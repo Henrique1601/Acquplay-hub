@@ -13,6 +13,9 @@ import { AuditoriaView, CasoAuditoriaItem } from '@/components/dashboard/Auditor
 import { CicloMetadadosBar } from '@/components/dashboard/CicloMetadadosBar';
 import { 
   calcularTarifaComgas, 
+  calcularValorSabesp,
+  conciliarComSergio,
+  normalizarChaveUnidade,
   ItemConciliacao, 
   MedicaoIndividual,
   CicloFechamento, 
@@ -82,14 +85,31 @@ export default function AcquaPlayHub() {
   // Dados Individuais carregados
   const [dadosAgua, setDadosAgua] = useState<MedicaoIndividual[]>([]);
   const [dadosGasIndividual, setDadosGasIndividual] = useState<MedicaoIndividual[]>([]);
+  const [dadosSergioAgua, setDadosSergioAgua] = useState<Array<{
+    unidade: string;
+    torre: string;
+    leituraAnterior?: number;
+    leituraAtual?: number;
+    consumo: number;
+    valorSergio: number;
+  }>>([]);
+  const [dadosSergioGas, setDadosSergioGas] = useState<Array<{
+    unidade: string;
+    torre: string;
+    leituraAnterior?: number;
+    leituraAtual?: number;
+    consumoGas: number;
+    valorGasSergio: number;
+  }>>([]);
   const [casosAuditoria, setCasosAuditoria] = useState<CasoAuditoriaItem[]>(CASOS_AUDITORIA_INICIAIS);
 
-  // Status de Upload das 4 planilhas
+  // Status de Upload das 5 planilhas/PDFs
   const [uploadStatus, setUploadStatus] = useState<UploadStatusState>({
     agua: { carregado: false },
     gasIndividual: { carregado: false },
     comgas: { carregado: true, nomeArquivo: '16_Medidores_Padrao.xlsx', total: 16 },
-    sergio: { carregado: false }
+    sergioAgua: { carregado: false },
+    sergioGas: { carregado: false }
   });
 
   const [cicloFechamento, setCicloFechamento] = useState<CicloFechamento>({
@@ -153,126 +173,122 @@ export default function AcquaPlayHub() {
   }, [dadosConciliacao]);
   const aprovadosCount = dadosConciliacao.length - divergenciasCount;
 
-  // Função para sintetizar dados individuais com a conciliação
+  // Função para sintetizar dados individuais (Nossos Extratos) com Demonstrativos do Sérgio (Água & Gás)
   const atualizarSintese = (
     novosItensAgua: MedicaoIndividual[], 
     novosItensGas: MedicaoIndividual[], 
-    itensConciliacaoBase: ItemConciliacao[]
+    novosSergioAgua = dadosSergioAgua,
+    novosSergioGas = dadosSergioGas
   ) => {
-    // Mapa de água
     const mapaAgua = new Map<string, MedicaoIndividual>();
-    novosItensAgua.forEach(i => mapaAgua.set(i.unidade.trim().toUpperCase(), i));
+    novosItensAgua.forEach(i => mapaAgua.set(normalizarChaveUnidade(i.unidade), i));
 
-    // Mapa de gás
     const mapaGas = new Map<string, MedicaoIndividual>();
-    novosItensGas.forEach(i => mapaGas.set(i.unidade.trim().toUpperCase(), i));
+    novosItensGas.forEach(i => mapaGas.set(normalizarChaveUnidade(i.unidade), i));
 
-    // Novas vistorias 3:1
+    const mapaSergioAgua = new Map<string, typeof novosSergioAgua[number]>();
+    novosSergioAgua.forEach(i => mapaSergioAgua.set(normalizarChaveUnidade(i.unidade), i));
+
+    const mapaSergioGas = new Map<string, typeof novosSergioGas[number]>();
+    novosSergioGas.forEach(i => mapaSergioGas.set(normalizarChaveUnidade(i.unidade), i));
+
+    const todasChaves = Array.from(new Set([
+      ...Array.from(mapaAgua.keys()),
+      ...Array.from(mapaGas.keys()),
+      ...Array.from(mapaSergioAgua.keys()),
+      ...Array.from(mapaSergioGas.keys()),
+    ]));
+
+    if (todasChaves.length === 0) return;
+
     const novasVistorias: CasoAuditoriaItem[] = [];
+    const listaFinal: ItemConciliacao[] = todasChaves.map(chave => {
+      const medAgua = mapaAgua.get(chave);
+      const medGas = mapaGas.get(chave);
+      const sAgua = mapaSergioAgua.get(chave);
+      const sGas = mapaSergioGas.get(chave);
 
-    // Se tivermos itens de conciliação do Sérgio, enriquecemos com as medições de água e gás
-    let listaFinal: ItemConciliacao[] = [];
+      const unidade = medAgua?.unidade || sAgua?.unidade || medGas?.unidade || sGas?.unidade || chave;
+      const torre = extrairTorre(unidade);
 
-    if (itensConciliacaoBase.length > 0) {
-      listaFinal = itensConciliacaoBase.map(item => {
-        const chave = item.unidade.trim().toUpperCase();
-        const medAgua = mapaAgua.get(chave);
-        const medGas = mapaGas.get(chave);
+      // Água: usa nossos índices (Extrato) quando carregado; senão usa o consumo do Demonstrativo do Sérgio
+      const consumoAgua = medAgua ? medAgua.consumo : (sAgua?.consumo ?? 0);
+      const leituraAnteriorAgua = medAgua?.leituraAnterior ?? sAgua?.leituraAnterior;
+      const leituraAtualAgua = medAgua?.leituraAtual ?? sAgua?.leituraAtual;
+      const valorSergioAgua = sAgua ? sAgua.valorSergio : calcularValorSabesp(consumoAgua);
+      const auditAgua = conciliarComSergio(
+        unidade,
+        consumoAgua,
+        valorSergioAgua,
+        leituraAnteriorAgua,
+        leituraAtualAgua
+      );
 
-        const consumoAgua = medAgua ? medAgua.consumo : item.consumo;
-        const consumoGas = medGas ? medGas.consumo : (item.consumoGas ?? 0);
-        const torre = item.torre || extrairTorre(item.unidade);
-        const tarifaTorre = dadosGas.tarifasPorTorre[torre] || dadosGas.tarifa;
-        const valorGasCalculado = Number((consumoGas * tarifaTorre).toFixed(2));
+      // Gás: usa nossos índices (Extrato Gás) quando carregado; senão usa o consumo do Demonstrativo Gás do Sérgio
+      const consumoGas = medGas ? medGas.consumo : (sGas?.consumoGas ?? 0);
+      const tarifaTorre = dadosGas.tarifasPorTorre[torre] || dadosGas.tarifa;
+      const valorGasHydrojexe = Number((consumoGas * tarifaTorre).toFixed(2));
+      const valorGasSergio = sGas?.valorGasSergio ?? 0;
 
-        // Auditoria 3:1
-        if (consumoAgua > 0 || consumoGas > 0) {
-          const audit = auditarAguaGas(consumoAgua, consumoGas);
-          if (audit.vistoriarAgua || audit.vistoriarGas) {
-            novasVistorias.push({
-              id: `${item.unidade}-${novasVistorias.length}`,
-              unidade: item.unidade,
-              consumoAgua,
-              consumoGas,
-              motivo: audit.motivo || 'Disparidade 3:1 detectada',
-              confirmado: false,
-              observacao: audit.vistoriarGas ? 'Vistoriar gasômetro' : 'Vistoriar hidrômetro'
-            });
-          }
+      let statusGas: 'VERDADEIRO' | 'FALSO' | 'SERGIO_ZERADO' | undefined;
+      if (consumoGas > 0) {
+        if (valorGasSergio === 0) {
+          statusGas = 'SERGIO_ZERADO';
+        } else {
+          statusGas = Math.abs(valorGasHydrojexe - valorGasSergio) <= 0.05 ? 'VERDADEIRO' : 'FALSO';
         }
+      }
 
-        const valorGasSergio = item.valorGasSergio ?? 0;
-        const statusGas = valorGasSergio === 0 && consumoGas > 0 ? 'SERGIO_ZERADO' : item.statusGas;
-
-        return {
-          ...item,
-          torre,
-          consumo: consumoAgua,
-          leituraAnterior: medAgua?.leituraAnterior ?? item.leituraAnterior,
-          leituraAtual: medAgua?.leituraAtual ?? item.leituraAtual,
-          consumoGas,
-          tarifaGasTorre: tarifaTorre,
-          valorGasHydrojexe: valorGasCalculado,
-          valorGasSergio,
-          statusGas,
-          valorTotalHydrojexe: Number((item.valorHydrojexe + valorGasCalculado).toFixed(2)),
-          valorTotalSergio: Number(((item.valorSergio || 0) + valorGasSergio).toFixed(2))
-        };
-      });
-    } else {
-      // Se ainda não subiu a folha do Sérgio, monta a partir de água e gás
-      const todasUnidades = Array.from(new Set([...Array.from(mapaAgua.keys()), ...Array.from(mapaGas.keys())]));
-      listaFinal = todasUnidades.map(chave => {
-        const medAgua = mapaAgua.get(chave);
-        const medGas = mapaGas.get(chave);
-        const unidade = medAgua?.unidade || medGas?.unidade || chave;
-        const torre = extrairTorre(unidade);
-        const consumoAgua = medAgua?.consumo || 0;
-        const valorAgua = medAgua?.valorCalculado || 80.84;
-        const consumoGas = medGas?.consumo || 0;
-        const tarifaTorre = dadosGas.tarifasPorTorre[torre] || dadosGas.tarifa;
-        const valorGas = Number((consumoGas * tarifaTorre).toFixed(2));
-
-        if (consumoAgua > 0 || consumoGas > 0) {
-          const audit = auditarAguaGas(consumoAgua, consumoGas);
-          if (audit.vistoriarAgua || audit.vistoriarGas) {
-            novasVistorias.push({
-              id: `${unidade}-${novasVistorias.length}`,
-              unidade,
-              consumoAgua,
-              consumoGas,
-              motivo: audit.motivo || 'Disparidade 3:1 detectada',
-              confirmado: false,
-              observacao: audit.vistoriarGas ? 'Vistoriar gasômetro' : 'Vistoriar hidrômetro'
-            });
-          }
+      if (consumoAgua > 0 || consumoGas > 0) {
+        const audit = auditarAguaGas(consumoAgua, consumoGas);
+        if (audit.vistoriarAgua || audit.vistoriarGas) {
+          novasVistorias.push({
+            id: `${unidade}-${novasVistorias.length}`,
+            unidade,
+            consumoAgua,
+            consumoGas,
+            motivo: audit.motivo || 'Disparidade 3:1 detectada',
+            confirmado: false,
+            observacao: audit.vistoriarGas ? 'Vistoriar gasômetro' : 'Vistoriar hidrômetro'
+          });
         }
+      }
 
-        return {
-          unidade,
-          torre,
-          consumo: consumoAgua,
-          valorHydrojexe: valorAgua,
-          valorSergio: valorAgua, // Estimativa pré-conciliação
-          status: 'VERDADEIRO',
-          diferenca: 0,
-          diferencaAbs: 0,
-          leituraAnterior: medAgua?.leituraAnterior,
-          leituraAtual: medAgua?.leituraAtual,
-          consumoGas,
-          tarifaGasTorre: tarifaTorre,
-          valorGasHydrojexe: valorGas,
-          valorGasSergio: 0,
-          statusGas: 'SERGIO_ZERADO',
-          valorTotalHydrojexe: Number((valorAgua + valorGas).toFixed(2)),
-          valorTotalSergio: valorAgua
-        };
-      });
-    }
+      return {
+        unidade,
+        torre,
+        consumo: consumoAgua,
+        valorHydrojexe: auditAgua.valorHydrojexe,
+        valorSergio: sAgua ? auditAgua.valorSergio : auditAgua.valorHydrojexe,
+        status: sAgua ? auditAgua.status : 'VERDADEIRO',
+        diferenca: sAgua ? auditAgua.diferenca : 0,
+        diferencaAbs: sAgua ? auditAgua.diferencaAbs : 0,
+        leituraAnterior: leituraAnteriorAgua,
+        leituraAtual: leituraAtualAgua,
+        leituraAnteriorSergio: sAgua?.leituraAnterior,
+        leituraAtualSergio: sAgua?.leituraAtual,
+        consumoSergio: sAgua?.consumo,
+        tipoAnomalia: auditAgua.tipoAnomalia,
+        observacao: auditAgua.observacao,
+        leituraAnteriorGas: medGas?.leituraAnterior,
+        leituraAtualGas: medGas?.leituraAtual,
+        consumoGas,
+        leituraAnteriorGasSergio: sGas?.leituraAnterior,
+        leituraAtualGasSergio: sGas?.leituraAtual,
+        consumoGasSergio: sGas?.consumoGas,
+        tarifaGasTorre: tarifaTorre,
+        valorGasHydrojexe,
+        valorGasSergio,
+        statusGas,
+        diferencaGas: Number((valorGasHydrojexe - valorGasSergio).toFixed(2)),
+        valorTotalHydrojexe: Number((auditAgua.valorHydrojexe + valorGasHydrojexe).toFixed(2)),
+        valorTotalSergio: Number(((sAgua ? auditAgua.valorSergio : 0) + valorGasSergio).toFixed(2))
+      };
+    });
 
     setDadosConciliacao(listaFinal);
     if (novasVistorias.length > 0) {
-      setCasosAuditoria(novasVistorias.slice(0, 50));
+      setCasosAuditoria(novasVistorias.slice(0, 100));
     }
   };
 
@@ -304,9 +320,9 @@ export default function AcquaPlayHub() {
         agua: { carregado: true, nomeArquivo: file.name, total: itens.length }
       }));
 
-      atualizarSintese(itens, dadosGasIndividual, dadosConciliacao);
+      atualizarSintese(itens, dadosGasIndividual, dadosSergioAgua, dadosSergioGas);
 
-      setUploadSuccessMessage(`Planilha de Água "${file.name}" carregada com sucesso: ${itens.length} hidrômetros individualizados.`);
+      setUploadSuccessMessage(`Nosso Extrato de Água "${file.name}" carregado com sucesso: ${itens.length} hidrômetros individualizados.`);
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : 'Falha ao processar água.');
     } finally {
@@ -343,9 +359,9 @@ export default function AcquaPlayHub() {
         gasIndividual: { carregado: true, nomeArquivo: file.name, total: itens.length }
       }));
 
-      atualizarSintese(dadosAgua, itens, dadosConciliacao);
+      atualizarSintese(dadosAgua, itens, dadosSergioAgua, dadosSergioGas);
 
-      setUploadSuccessMessage(`Planilha de Gás Individual "${file.name}" carregada: ${itens.length} gasômetros calculados com tarifa da torre.`);
+      setUploadSuccessMessage(`Nosso Extrato de Gás "${file.name}" carregado: ${itens.length} gasômetros calculados com tarifa da torre.`);
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : 'Falha ao processar gás individual.');
     } finally {
@@ -353,15 +369,15 @@ export default function AcquaPlayHub() {
     }
   };
 
-  // 3. Upload de Contas Comgás dos 16 Medidores Mestres
-  const handleUploadComgas = async (file: File) => {
+  // 3. Upload de Contas Comgás dos 16 Medidores Mestres (PDFs ou Excel)
+  const handleUploadComgas = async (files: File[]) => {
     setIsUploading(true);
     setUploadError(null);
     setUploadSuccessMessage(null);
 
     try {
       const formData = new FormData();
-      formData.append('file', file);
+      files.forEach(f => formData.append('files', f));
       formData.append('tipo', 'comgas');
       formData.append('manutencaoGas', String(manutencaoGasExpurgada));
 
@@ -385,13 +401,17 @@ export default function AcquaPlayHub() {
       setContasComgas(contas);
       setUploadStatus(prev => ({
         ...prev,
-        comgas: { carregado: true, nomeArquivo: file.name, total: contas.length }
+        comgas: {
+          carregado: true,
+          nomeArquivo: data.nomeArquivo || (files.length === 1 ? files[0].name : `${files.length} faturas PDF`),
+          total: contas.length
+        }
       }));
 
       // Recalcula síntese com novas tarifas de torre
-      atualizarSintese(dadosAgua, dadosGasIndividual, dadosConciliacao);
+      atualizarSintese(dadosAgua, dadosGasIndividual, dadosSergioAgua, dadosSergioGas);
 
-      setUploadSuccessMessage(`Contas Comgás processadas: 16 medidores mestres do 1º andar tarifados por Preço ÷ Volume.`);
+      setUploadSuccessMessage(`Contas Comgás processadas (${contas.length} medidores): tarifas calculadas por Preço ÷ Volume.`);
       setTabAtiva('gas');
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : 'Falha ao processar Comgás.');
@@ -400,8 +420,8 @@ export default function AcquaPlayHub() {
     }
   };
 
-  // 4. Upload da Folha do Sérgio (Conta Justa)
-  const handleUploadSergio = async (file: File) => {
+  // 4A. Upload do Demonstrativo do Sérgio — ÁGUA
+  const handleUploadSergioAgua = async (file: File) => {
     setIsUploading(true);
     setUploadError(null);
     setUploadSuccessMessage(null);
@@ -409,8 +429,7 @@ export default function AcquaPlayHub() {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('tipo', 'sergio');
-      formData.append('tarifasPorTorre', JSON.stringify(dadosGas.tarifasPorTorre));
+      formData.append('tipo', 'sergio_agua');
 
       const res = await fetch('/api/processar-planilha', {
         method: 'POST',
@@ -419,22 +438,63 @@ export default function AcquaPlayHub() {
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Erro ao processar folha do Sérgio.');
+        throw new Error(data.error || 'Erro ao processar Demonstrativo de Água do Sérgio.');
       }
 
-      const itens = data.detalhes as ItemConciliacao[];
+      const itens = data.itens as typeof dadosSergioAgua;
+      setDadosSergioAgua(itens);
       setUploadStatus(prev => ({
         ...prev,
-        sergio: { carregado: true, nomeArquivo: file.name, total: itens.length }
+        sergioAgua: { carregado: true, nomeArquivo: file.name, total: itens.length }
       }));
 
-      atualizarSintese(dadosAgua, dadosGasIndividual, itens);
+      atualizarSintese(dadosAgua, dadosGasIndividual, itens, dadosSergioGas);
 
-      let msg = `Folha do Sérgio processada com sucesso: ${data.total} unidades conciliadas com Sabesp 2026.`;
-      if (data.contadorGasZerado && data.contadorGasZerado > 0) {
-        msg += ` ℹ️ Foi detectado que ${data.contadorGasZerado} unidades vieram com gás zerado no Sérgio; a tarifa calculada por torre foi aplicada automaticamente!`;
+      setUploadSuccessMessage(`Demonstrativo Sérgio (Água) "${file.name}" carregado: ${itens.length} unidades cruzadas na Tabela Sabesp 2026.`);
+      setTabAtiva('conciliacao');
+      consoleRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Falha na comunicação com o servidor.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // 4B. Upload do Demonstrativo do Sérgio — GÁS
+  const handleUploadSergioGas = async (file: File) => {
+    setIsUploading(true);
+    setUploadError(null);
+    setUploadSuccessMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('tipo', 'sergio_gas');
+
+      const res = await fetch('/api/processar-planilha', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Erro ao processar Demonstrativo de Gás do Sérgio.');
       }
 
+      const itens = data.itens as typeof dadosSergioGas;
+      setDadosSergioGas(itens);
+      setUploadStatus(prev => ({
+        ...prev,
+        sergioGas: { carregado: true, nomeArquivo: file.name, total: itens.length }
+      }));
+
+      atualizarSintese(dadosAgua, dadosGasIndividual, dadosSergioAgua, itens);
+
+      const zerados = itens.filter(i => i.consumoGas > 0 && i.valorGasSergio === 0).length;
+      let msg = `Demonstrativo Sérgio (Gás) "${file.name}" carregado: ${itens.length} unidades cruzadas.`;
+      if (zerados > 0) {
+        msg += ` ℹ️ ${zerados} unidades vieram com valor zerado no Sérgio; aplicada tarifa por torre da Comgás.`;
+      }
       setUploadSuccessMessage(msg);
       setTabAtiva('conciliacao');
       consoleRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -471,7 +531,23 @@ export default function AcquaPlayHub() {
       const wsConciliacao = XLSX.utils.json_to_sheet(dadosExportConciliacao);
       XLSX.utils.book_append_sheet(wb, wsConciliacao, 'Conciliacao_Geral');
 
-      // Aba 2: Comgás 16 Medidores Mestres (com fórmula Preço ÷ Volume)
+      // Aba 2: Tabela Sabesp (Nossos Índices x Preço Sérgio)
+      const dadosTabelaSabesp = dadosConciliacao.map(item => ({
+        'Unidade': item.unidade,
+        'Leitura Anterior (Nosso)': item.leituraAnterior ?? '',
+        'Leitura Atual (Nosso)': item.leituraAtual ?? '',
+        'Consumo Água (m³)': item.consumo,
+        'Valor Sabesp Hydrojexe (R$)': item.valorHydrojexe,
+        'Valor Sérgio (R$)': item.valorSergio,
+        'Comparativo': item.status,
+        'Diferença (R$)': item.diferenca,
+        'Consumo Sérgio (m³)': item.consumoSergio ?? '',
+        'Observações': item.observacao || ''
+      }));
+      const wsSabesp = XLSX.utils.json_to_sheet(dadosTabelaSabesp);
+      XLSX.utils.book_append_sheet(wb, wsSabesp, 'Tabela_Sabesp');
+
+      // Aba 3: Comgás 16 Medidores Mestres (com fórmula Preço ÷ Volume)
       const dadosExportGas = contasComgas.map(c => {
         const tarifaMedidor = c.volumeM3 > 0 ? c.valorRs / c.volumeM3 : 0;
         return {
@@ -629,7 +705,8 @@ export default function AcquaPlayHub() {
                 onUploadAgua={handleUploadAgua}
                 onUploadGasIndividual={handleUploadGasIndividual}
                 onUploadComgas={handleUploadComgas}
-                onUploadSergio={handleUploadSergio}
+                onUploadSergioAgua={handleUploadSergioAgua}
+                onUploadSergioGas={handleUploadSergioGas}
                 onIrParaConciliacao={() => setTabAtiva('conciliacao')}
                 onIrParaComgas={() => setTabAtiva('gas')}
               />
