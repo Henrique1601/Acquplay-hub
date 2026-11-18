@@ -1,4 +1,5 @@
 // lib/acquaPlayEngine.ts
+import * as XLSX from 'xlsx';
 
 export interface ContaComgasMedidor {
   codigoConta: number | string;
@@ -20,6 +21,17 @@ export interface CicloFechamento {
   dataProximaLeitura: string;
 }
 
+export interface MedicaoIndividual {
+  unidade: string;
+  torre: string;
+  leituraAnterior?: number;
+  leituraAtual?: number;
+  consumo: number;
+  valorCalculado?: number;
+  tipoAnomalia?: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
+  observacao?: string;
+}
+
 export interface ItemConciliacao {
   unidade: string;
   consumo: number;
@@ -32,11 +44,34 @@ export interface ItemConciliacao {
   leituraAtual?: number;
   tipoAnomalia?: 'NEGATIVO' | 'ALTO' | 'BAIXO_QUASE_ZERO' | 'NORMAL';
   observacao?: string;
+
+  // Campos específicos de gás e consolidação
+  torre?: string;
+  consumoGas?: number;
+  tarifaGasTorre?: number;
+  valorGasHydrojexe?: number;
+  valorGasSergio?: number;
+  statusGas?: 'VERDADEIRO' | 'FALSO' | 'SERGIO_ZERADO';
+  diferencaGas?: number;
+
+  // Total combinado
+  valorTotalHydrojexe?: number;
+  valorTotalSergio?: number;
+}
+
+export interface TarifaPorMedidor {
+  codigo: string | number;
+  bloco: string;
+  torre: string;
+  valorRs: number;
+  volumeM3: number;
+  tarifa: number;
+  tarifaFormatada: string;
 }
 
 /**
- * Converte valores numéricos flexíveis (ex: "12,84", "R$ 113,16", 12.84, undefined)
- * para number de ponto flutuante padrão JS, com segurança contra NaN.
+ * Converte valores numéricos flexíveis (ex: "12,84", "R$ 113,16", 12.84, undefined, "-")
+ * para number de ponto flutuante padrão JS, com segurança contra NaN e formatos brasileiros.
  */
 export function parseNumeroBR(val: unknown): number {
   if (typeof val === 'number') {
@@ -47,10 +82,9 @@ export function parseNumeroBR(val: unknown): number {
   }
 
   const str = String(val).trim();
-  if (!str) return 0;
+  if (!str || str === '-' || str === '--') return 0;
 
-  // Remove caracteres que não sejam dígitos, sinal de menos ou vírgula/ponto
-  // Trata formato brasileiro (1.234,56 -> 1234.56 ou 12,84 -> 12.84)
+  // Remove símbolos monetários, espaços, etc.
   const limpo = str.replace(/[^0-9,.-]/g, '');
   
   if (limpo.includes(',') && limpo.includes('.')) {
@@ -88,6 +122,37 @@ export function formatarM3(valor: number, decimais = 2): string {
     minimumFractionDigits: decimais,
     maximumFractionDigits: decimais,
   }).format(isNaN(valor) ? 0 : valor);
+}
+
+/**
+ * Extrai a Torre/Bloco de um identificador de apartamento (ex: "Torre A-APTO0031", "BLOCO B - 12", "TORRE C / 45")
+ */
+export function extrairTorre(unidade: string): string {
+  const str = (unidade || '').toUpperCase().trim();
+  
+  const matchTorre = str.match(/TORRE\s*([A-H1-8])/i) || str.match(/BLOCO\s*([A-H1-8])/i);
+  if (matchTorre) {
+    const letraOuNum = matchTorre[1];
+    const mapaNum: Record<string, string> = {
+      '1': 'A', '2': 'B', '3': 'C', '4': 'D', '5': 'E', '6': 'F', '7': 'G', '8': 'H'
+    };
+    const letra = mapaNum[letraOuNum] || letraOuNum;
+    return `TORRE ${letra}`;
+  }
+
+  // Padrão A-123 ou T-A-123
+  const matchInicial = str.match(/^(?:T-)?([A-H])[-_\s]/);
+  if (matchInicial) {
+    return `TORRE ${matchInicial[1]}`;
+  }
+
+  // Padrão no meio: "- A -" ou " A /"
+  const matchMeio = str.match(/[-_\s]([A-H])[-_\s/]/);
+  if (matchMeio) {
+    return `TORRE ${matchMeio[1]}`;
+  }
+
+  return 'TORRE A'; // Fallback padrão
 }
 
 /**
@@ -201,8 +266,7 @@ export function classificarConsumo(consumo: number, mediaReferencia: number = 20
 
 /**
  * 4. Cálculo da Tarifa de Gás Comgás (16 Medidores) com expurgo de manutenção
- * Regra do Notion: Taxas de manutenção dos medidores da concessionária são
- * deduzidas do valor total antes de calcular a tarifa que vai para o Sérgio.
+ * A fórmula da tarifa de cada medidor/torre é: Preço da conta dividido pelo consumo daquele medidor.
  */
 export function calcularTarifaComgas(
   contas: ContaComgasMedidor[],
@@ -214,6 +278,8 @@ export function calcularTarifaComgas(
   totalM3: number;
   tarifa: number;
   tarifaFormatada: string;
+  tarifasPorTorre: Record<string, number>;
+  medidoresDetalhados: TarifaPorMedidor[];
 } {
   const totalBrutoRs = contas.reduce((acc, c) => acc + (c.valorRs || 0), 0);
   const totalM3 = contas.reduce((acc, c) => acc + (c.volumeM3 || 0), 0);
@@ -221,16 +287,51 @@ export function calcularTarifaComgas(
   const manutencaoLimpa = Math.max(0, isNaN(valorManutencaoExpurgada) ? 0 : valorManutencaoExpurgada);
   const totalLiquidoRs = Math.max(0, totalBrutoRs - manutencaoLimpa);
 
-  // Tarifa líquida dividida pelo m3 total faturado
-  const tarifa = totalM3 > 0 ? totalLiquidoRs / totalM3 : 0;
+  // Tarifa líquida média
+  const tarifaMedia = totalM3 > 0 ? totalLiquidoRs / totalM3 : 0;
+  const fatorLiquido = totalBrutoRs > 0 ? totalLiquidoRs / totalBrutoRs : 1;
+
+  // Calcula tarifa individual de cada um dos 16 medidores
+  const medidoresDetalhados: TarifaPorMedidor[] = contas.map(c => {
+    const torre = extrairTorre(c.blocoMedidor);
+    const vol = c.volumeM3 || 0;
+    const valorLiq = (c.valorRs || 0) * fatorLiquido;
+    const tarifa = vol > 0 ? valorLiq / vol : tarifaMedia;
+
+    return {
+      codigo: c.codigoConta,
+      bloco: c.blocoMedidor,
+      torre,
+      valorRs: Number((c.valorRs || 0).toFixed(2)),
+      volumeM3: vol,
+      tarifa: Number(tarifa.toFixed(4)),
+      tarifaFormatada: tarifa.toFixed(2)
+    };
+  });
+
+  // Agrupa tarifas por Torre (média ponderada caso haja 2 medidores por torre)
+  const torresMap: Record<string, { totalRs: number; totalM3: number }> = {};
+  medidoresDetalhados.forEach(m => {
+    if (!torresMap[m.torre]) torresMap[m.torre] = { totalRs: 0, totalM3: 0 };
+    torresMap[m.torre].totalRs += m.valorRs * fatorLiquido;
+    torresMap[m.torre].totalM3 += m.volumeM3;
+  });
+
+  const tarifasPorTorre: Record<string, number> = {};
+  Object.keys(torresMap).forEach(torre => {
+    const t = torresMap[torre];
+    tarifasPorTorre[torre] = t.totalM3 > 0 ? Number((t.totalRs / t.totalM3).toFixed(4)) : tarifaMedia;
+  });
 
   return {
     totalBrutoRs: Number(totalBrutoRs.toFixed(2)),
     manutencaoExpurgadaRs: Number(manutencaoLimpa.toFixed(2)),
     totalLiquidoRs: Number(totalLiquidoRs.toFixed(2)),
     totalM3,
-    tarifa: Number(tarifa.toFixed(4)),
-    tarifaFormatada: tarifa.toFixed(2)
+    tarifa: Number(tarifaMedia.toFixed(4)),
+    tarifaFormatada: tarifaMedia.toFixed(2),
+    tarifasPorTorre,
+    medidoresDetalhados
   };
 }
 
@@ -264,9 +365,89 @@ export function auditarAguaGas(agua: number, gas: number): {
 }
 
 /**
+ * Extrai campo de um objeto de linha com suporte a múltiplos aliases case-insensitive
+ */
+export function extrairCampoLinha(row: Record<string, unknown>, possiveisChaves: string[]): unknown {
+  for (const chave of possiveisChaves) {
+    if (row[chave] !== undefined && row[chave] !== null && row[chave] !== '') {
+      return row[chave];
+    }
+    const matchChave = Object.keys(row).find(
+      k => k.trim().toLowerCase() === chave.toLowerCase()
+    );
+    if (matchChave && row[matchChave] !== undefined && row[matchChave] !== null && row[matchChave] !== '') {
+      return row[matchChave];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Parser Universal de Abas do Excel.
+ * Detecta dinamicamente a linha de cabeçalho mesmo que haja logos ou títulos nas linhas 1 a 5.
+ */
+export function extrairLinhasUniversal(worksheet: XLSX.WorkSheet): Record<string, unknown>[] {
+  const matriz: unknown[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+  if (!matriz || matriz.length === 0) return [];
+
+  // Palavras-chave típicas de cabeçalho
+  const palavrasChave = [
+    'unidade', 'medidor', 'apto', 'apartamento', 'bloco', 'nome medidor', 
+    'consumo', 'valor', 'leitura', 'anterior', 'atual', 'total', 'código', 'conta', 'volume'
+  ];
+
+  let linhaCabecalhoIdx = -1;
+  let melhorContagem = 0;
+
+  for (let i = 0; i < Math.min(15, matriz.length); i++) {
+    const linha = matriz[i];
+    if (!Array.isArray(linha)) continue;
+
+    let contagem = 0;
+    linha.forEach(celula => {
+      const texto = String(celula || '').toLowerCase().trim();
+      if (palavrasChave.some(pc => texto.includes(pc))) {
+        contagem++;
+      }
+    });
+
+    if (contagem > melhorContagem) {
+      melhorContagem = contagem;
+      linhaCabecalhoIdx = i;
+    }
+  }
+
+  if (linhaCabecalhoIdx === -1 || melhorContagem < 1) {
+    linhaCabecalhoIdx = 0;
+  }
+
+  const cabecalhos = (matriz[linhaCabecalhoIdx] || []).map((c, idx) => {
+    const str = String(c || '').trim();
+    return str || `COLUNA_${idx + 1}`;
+  });
+
+  const linhasObjetos: Record<string, unknown>[] = [];
+  for (let r = linhaCabecalhoIdx + 1; r < matriz.length; r++) {
+    const linha = matriz[r];
+    if (!Array.isArray(linha) || linha.every(c => c === '' || c === null || c === undefined)) {
+      continue;
+    }
+
+    const obj: Record<string, unknown> = {};
+    cabecalhos.forEach((header, colIdx) => {
+      if (header) {
+        obj[header] = linha[colIdx] !== undefined ? linha[colIdx] : '';
+      }
+    });
+
+    linhasObjetos.push(obj);
+  }
+
+  return linhasObjetos;
+}
+
+/**
  * 6. Gerador do Relatório Oficial para o Sérgio (Word / WhatsApp)
- * Conforme instrução do Notion: "O que for falso documentar no Word e mandar para o Sérgio
- * e ver o porquê está diferente, anotar tudo."
  */
 export function gerarRelatorioSergio(
   ciclo: CicloFechamento,

@@ -1,38 +1,25 @@
 // app/api/conciliar/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
-import { conciliarComSergio, parseNumeroBR, ItemConciliacao } from '@/lib/acquaPlayEngine';
+import {
+  extrairLinhasUniversal,
+  extrairCampoLinha,
+  parseNumeroBR,
+  extrairTorre,
+  conciliarComSergio,
+  ItemConciliacao
+} from '@/lib/acquaPlayEngine';
 
-interface SpreadsheetRow {
-  [key: string]: unknown;
-}
-
-const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB
-
-function extrairCampo(row: SpreadsheetRow, possiveisChaves: string[]): unknown {
-  for (const chave of possiveisChaves) {
-    if (row[chave] !== undefined && row[chave] !== null && row[chave] !== '') {
-      return row[chave];
-    }
-    // Busca case-insensitive
-    const matchChave = Object.keys(row).find(
-      k => k.trim().toLowerCase() === chave.toLowerCase()
-    );
-    if (matchChave && row[matchChave] !== undefined && row[matchChave] !== null && row[matchChave] !== '') {
-      return row[matchChave];
-    }
-  }
-  return undefined;
-}
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const file = formData.get('fileSergio');
+    const file = formData.get('fileSergio') || formData.get('file');
 
     if (!file || !(file instanceof File)) {
       return NextResponse.json(
-        { error: 'Nenhum ficheiro válido enviado sob a chave "fileSergio".' },
+        { error: 'Nenhum ficheiro válido enviado sob a chave "fileSergio" ou "file".' },
         { status: 400 }
       );
     }
@@ -62,19 +49,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const sheetName = wb.SheetNames.includes('Desmembrada')
-      ? 'Desmembrada'
-      : wb.SheetNames[0];
+    // Busca inteligente em todas as abas
+    let sheetName = wb.SheetNames[0];
+    let rows: Record<string, unknown>[] = [];
 
-    const worksheet = wb.Sheets[sheetName];
-    if (!worksheet) {
-      return NextResponse.json(
-        { error: `Não foi possível acessar a aba "${sheetName}" da planilha.` },
-        { status: 400 }
-      );
+    const prioridades = ['desmembrada', 'medição', 'medicao', 'água', 'agua', 'folha', 'sergio'];
+    const abasOrdenadas = [...wb.SheetNames].sort((a, b) => {
+      const aMatch = prioridades.some(p => a.toLowerCase().includes(p)) ? 1 : 0;
+      const bMatch = prioridades.some(p => b.toLowerCase().includes(p)) ? 1 : 0;
+      return bMatch - aMatch;
+    });
+
+    for (const sName of abasOrdenadas) {
+      const worksheet = wb.Sheets[sName];
+      if (!worksheet) continue;
+      const linhas = extrairLinhasUniversal(worksheet);
+      if (linhas.length > rows.length) {
+        rows = linhas;
+        sheetName = sName;
+      }
     }
-
-    const rows = XLSX.utils.sheet_to_json<SpreadsheetRow>(worksheet, { defval: '' });
 
     if (!rows || rows.length === 0) {
       return NextResponse.json(
@@ -88,29 +82,31 @@ export async function POST(req: NextRequest) {
     const negativos: ItemConciliacao[] = [];
 
     for (const row of rows) {
-      const unidadeRaw = extrairCampo(row, [
+      const unidadeRaw = extrairCampoLinha(row, [
         'Nome Medidor',
         'Unidade',
         'Medidor',
         'Apartamento',
         'Apto',
-        'Identificador'
+        'Identificador',
+        'Apt'
       ]);
 
       if (!unidadeRaw) continue;
 
       const unidade = String(unidadeRaw).trim();
 
-      const consumoRaw = extrairCampo(row, [
+      const consumoRaw = extrairCampoLinha(row, [
         'Consumo',
         'Consumo (m³)',
         'Consumo m3',
         'Volume',
         'm3',
-        'Consumo Sabesp'
+        'Consumo Sabesp',
+        'M3'
       ]);
 
-      const valorSergioRaw = extrairCampo(row, [
+      const valorSergioRaw = extrairCampoLinha(row, [
         'Valor',
         'Valor (R$)',
         'Total',
@@ -119,7 +115,7 @@ export async function POST(req: NextRequest) {
         'Valor Cobrado'
       ]);
 
-      const leituraAnteriorRaw = extrairCampo(row, [
+      const leituraAnteriorRaw = extrairCampoLinha(row, [
         'Leitura Anterior',
         'Leit Anterior',
         'Leitura Ant',
@@ -127,24 +123,46 @@ export async function POST(req: NextRequest) {
         'Anterior'
       ]);
 
-      const leituraAtualRaw = extrairCampo(row, [
+      const leituraAtualRaw = extrairCampoLinha(row, [
         'Leitura Atual',
         'Leit Atual',
         'Atual'
+      ]);
+
+      const consumoGasRaw = extrairCampoLinha(row, [
+        'Consumo Gás',
+        'Consumo Gas',
+        'Gás (m³)',
+        'Gas m3'
+      ]);
+
+      const valorSergioGasRaw = extrairCampoLinha(row, [
+        'Valor Gás',
+        'Valor Gas',
+        'Gás (R$)',
+        'Gas R$'
       ]);
 
       const consumo = parseNumeroBR(consumoRaw);
       const valorSergio = parseNumeroBR(valorSergioRaw);
       const leituraAnterior = leituraAnteriorRaw !== undefined ? parseNumeroBR(leituraAnteriorRaw) : undefined;
       const leituraAtual = leituraAtualRaw !== undefined ? parseNumeroBR(leituraAtualRaw) : undefined;
+      const consumoGas = consumoGasRaw !== undefined ? parseNumeroBR(consumoGasRaw) : undefined;
+      const valorSergioGas = valorSergioGasRaw !== undefined ? parseNumeroBR(valorSergioGasRaw) : undefined;
 
       const audit = conciliarComSergio(unidade, consumo, valorSergio, leituraAnterior, leituraAtual);
+      const torre = extrairTorre(unidade);
+
       const item: ItemConciliacao = {
         unidade,
+        torre,
         consumo,
         leituraAnterior,
         leituraAtual,
-        ...audit
+        ...audit,
+        consumoGas,
+        valorGasSergio: valorSergioGas,
+        statusGas: valorSergioGas === 0 ? 'SERGIO_ZERADO' : undefined
       };
 
       resultadoConciliacao.push(item);
