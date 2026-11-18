@@ -268,6 +268,7 @@ export async function POST(req: NextRequest) {
     // 3. Processar Contas Comgás dos 16 Medidores Mestres (1º andar)
     if (tipo === 'comgas') {
       const contas: ContaComgasMedidor[] = [];
+      let manutencaoPlanilha = 0;
 
       for (const row of linhasExtraidas) {
         const blocoRaw = extrairCampoLinha(row, [
@@ -279,16 +280,20 @@ export async function POST(req: NextRequest) {
         const valorRaw = extrairCampoLinha(row, [
           'Valor em R$', 'Valor (R$)', 'Valor', 'Total', 'Valor Total', 'R$', 'Valor Fatura'
         ]);
+        const manutencaoRaw = extrairCampoLinha(row, [
+          'Manutenções', 'Manutencoes', 'Manutenção', 'Manutencao'
+        ]);
         const volumeRaw = extrairCampoLinha(row, [
           'Consumo Medido Comgás', 'Consumo Medido', 'Volume (m³)', 'Volume m3', 'Volume', 'Consumo', 'm3', 'Faturado', 'Volume Faturado'
         ]);
 
         const blocoStr = String(blocoRaw || '').trim();
         if (!blocoRaw && !codigoRaw && !valorRaw) continue;
-        if (/^total\b/i.test(blocoStr) && !codigoRaw) continue;
+        if (/^(total|fator)\b/i.test(blocoStr) && !codigoRaw) continue;
 
         const valorRs = parseNumeroBR(valorRaw);
         const volumeM3 = parseNumeroBR(volumeRaw);
+        manutencaoPlanilha += parseNumeroBR(manutencaoRaw);
         const bloco = blocoStr || `Medidor ${contas.length + 1}`;
         const codigoConta = String(codigoRaw || `3046${1400 + contas.length}`).trim();
 
@@ -307,12 +312,14 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const resultadoGas = calcularTarifaComgas(contas, manutencaoGas);
+      const manutencaoFinal = manutencaoPlanilha > 0 ? manutencaoPlanilha : manutencaoGas;
+      const resultadoGas = calcularTarifaComgas(contas, manutencaoFinal);
 
       return NextResponse.json({
         success: true,
         tipo: 'comgas',
         contas,
+        manutencaoTotal: manutencaoFinal,
         resultadoGas,
         abaProcessada: melhorSheetName,
         nomeArquivo: file.name

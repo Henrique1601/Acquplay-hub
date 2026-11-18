@@ -224,10 +224,12 @@ export default function AcquaPlayHub() {
         leituraAtualAgua
       );
 
-      // Gás: usa nossos índices (Extrato Gás) quando carregado; senão usa o consumo do Demonstrativo Gás do Sérgio
-      const consumoGas = medGas ? medGas.consumo : (sGas?.consumoGas ?? 0);
-      const tarifaTorre = dadosGas.tarifasPorTorre[torre] || dadosGas.tarifa;
-      const valorGasHydrojexe = Number((consumoGas * tarifaTorre).toFixed(2));
+      // Gás: consumo vem do Demonstrativo do Sérgio; Leitura Anterior vem da Leitura Atual do nosso Extrato do mês passado (quando carregado)
+      const leituraAnteriorGas = medGas?.leituraAtual ?? sGas?.leituraAnterior;
+      const leituraAtualGas = sGas?.leituraAtual ?? medGas?.leituraAtual;
+      const consumoGas = sGas ? sGas.consumoGas : (medGas?.consumo ?? 0);
+      const fatorComgas = dadosGas.tarifa > 0 ? dadosGas.tarifa : (dadosGas.tarifasPorTorre[torre] || 5.51);
+      const valorGasHydrojexe = Number((consumoGas * fatorComgas).toFixed(2));
       const valorGasSergio = sGas?.valorGasSergio ?? 0;
 
       let statusGas: 'VERDADEIRO' | 'FALSO' | 'SERGIO_ZERADO' | undefined;
@@ -270,13 +272,13 @@ export default function AcquaPlayHub() {
         consumoSergio: sAgua?.consumo,
         tipoAnomalia: auditAgua.tipoAnomalia,
         observacao: auditAgua.observacao,
-        leituraAnteriorGas: medGas?.leituraAnterior,
-        leituraAtualGas: medGas?.leituraAtual,
+        leituraAnteriorGas,
+        leituraAtualGas,
         consumoGas,
         leituraAnteriorGasSergio: sGas?.leituraAnterior,
         leituraAtualGasSergio: sGas?.leituraAtual,
         consumoGasSergio: sGas?.consumoGas,
-        tarifaGasTorre: tarifaTorre,
+        tarifaGasTorre: fatorComgas,
         valorGasHydrojexe,
         valorGasSergio,
         statusGas,
@@ -399,6 +401,9 @@ export default function AcquaPlayHub() {
       }));
 
       setContasComgas(contas);
+      if (typeof data.manutencaoTotal === 'number' && data.manutencaoTotal > 0) {
+        setManutencaoGasExpurgada(data.manutencaoTotal);
+      }
       setUploadStatus(prev => ({
         ...prev,
         comgas: {

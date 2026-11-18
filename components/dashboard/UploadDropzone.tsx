@@ -208,10 +208,10 @@ export function UploadDropzone({
             </div>
 
             <h3 className="font-semibold text-white text-base">
-              2. Nosso Extrato — Gás (Hydrojexe)
+              2. Nosso Extrato Gás — Mês Anterior (Opcional)
             </h3>
             <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-              Nosso extrato de gás individualizado (Leitura Anterior, Atual e Volume m³). Detecta trocas de cyble e calcula o valor pela tarifa da torre.
+              Nosso extrato de gás do mês passado: puxa automaticamente a <strong>Leitura Atual anterior</strong> para ser a <strong>Leitura Anterior</strong> deste mês (se não subir, usa a do Demonstrativo).
             </p>
 
             {uploadStatus.gasIndividual.nomeArquivo && (
@@ -461,10 +461,10 @@ export function UploadDropzone({
             </div>
 
             <h3 className="font-semibold text-white text-base">
-              5. Demonstrativo Sérgio — Gás
+              5. Demonstrativo Sérgio — Gás (Índices &amp; Consumo)
             </h3>
             <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-              Planilha <em>Demonstrativo de Consumo Geral de Gás</em> (lê aba <strong>ContaJusta</strong> ou <strong>Desmembrada</strong>) para cruzar índices, consumo e valor cobrado pelo Sérgio.
+              Fonte oficial do consumo e leitura atual de gás dos apartamentos. Aplica o <strong>Fator Comgás</strong> (Valor ÷ Volume) e sinaliza consumos negativos / troca de cyble.
             </p>
 
             {uploadStatus.sergioGas.nomeArquivo && (
